@@ -15,8 +15,8 @@ using Styx.WoWInternals.WoWObjects;
 
 namespace AutoCleanse
 {
-    // Removes Magic, Curse, Poison and Disease debuffs from you, and optionally your party or raid,
-    // with whatever cure spell your class and level know (3.3.5a), plus Dwarf Stoneform and the Warlock Felhunter.
+    // Removes Magic, Curse, Poison and Disease debuffs from your own character with whatever
+    // cure spell your class and level know (3.3.5a), plus Dwarf Stoneform and the Warlock Felhunter.
     public class AutoCleanse : HBPlugin
     {
         public override string Name { get { return "AutoCleanse"; } }
@@ -116,92 +116,38 @@ namespace AutoCleanse
 
             RefreshKnownSpells(me);
 
+            var wanted = WantedTypes(me);
+            if (wanted.Count == 0)
+                return;
+
             var classCovered = new HashSet<WoWDispelType>(
                 Cures.Where(c => !c.Racial && KnownRank(c) != 0).SelectMany(c => c.Removes));
 
-            foreach (var target in Targets(me))
+            foreach (var cure in Cures)
             {
-                var unit = target.Key;
-                var wanted = WantedTypes(unit);
-                if (wanted.Count == 0)
+                var types = cure.Removes.Where(wanted.Contains).ToList();
+                if (types.Count == 0)
+                    continue;
+                if (cure.Racial && (!S.UseStoneform || types.All(classCovered.Contains)))
                     continue;
 
-                foreach (var cure in Cures)
-                {
-                    var types = cure.Removes.Where(wanted.Contains).ToList();
-                    if (types.Count == 0)
-                        continue;
-                    if (cure.Racial && (unit != me || !S.UseStoneform || types.All(classCovered.Contains)))
-                        continue;
+                int id = KnownRank(cure);
+                if (id == 0 || InBackoff(cure.Name))
+                    continue;
 
-                    int id = KnownRank(cure);
-                    if (id == 0 || InBackoff(cure.Name + unit.Guid))
-                        continue;
-
-                    if (TryCast(me, unit, cure, id, types))
-                        return;
-                }
-
-                if (wanted.Contains(WoWDispelType.Magic) && S.UseFelhunter && me.Class == WoWClass.Warlock &&
-                    TryDevourMagic(me, unit, target.Value))
+                if (TryCast(me, cure, id, types))
                     return;
             }
+
+            if (wanted.Contains(WoWDispelType.Magic) && S.UseFelhunter && me.Class == WoWClass.Warlock)
+                TryDevourMagic(me);
         }
 
-        // You first, then party or raid members by lowest health. Value is the Lua unit token.
-        private static List<KeyValuePair<WoWUnit, string>> Targets(LocalPlayer me)
-        {
-            var targets = new List<KeyValuePair<WoWUnit, string>> { new KeyValuePair<WoWUnit, string>(me, "player") };
-
-            bool inRaid = me.IsInRaid;
-            string prefix;
-            int count;
-            if (inRaid && S.CureRaid)
-            {
-                prefix = "raid";
-                count = 40;
-            }
-            else if ((inRaid || me.IsInParty) && S.CureParty)
-            {
-                prefix = "party";
-                count = 4;
-            }
-            else
-                return targets;
-
-            var tokens = Lua.GetReturnValues(string.Format(
-                "local t = {{}} for i = 1, {1} do local g = UnitGUID(\"{0}\" .. i) " +
-                "if g then t[#t + 1] = \"{0}\" .. i .. \"=\" .. g end end return unpack(t)", prefix, count));
-            if (tokens == null)
-                return targets;
-
-            var members = new List<KeyValuePair<WoWUnit, string>>();
-            foreach (var entry in tokens)
-            {
-                var parts = entry.Split('=');
-                if (parts.Length != 2 || !parts[1].StartsWith("0x"))
-                    continue;
-
-                var guid = Convert.ToUInt64(parts[1].Substring(2), 16);
-                if (guid == me.Guid)
-                    continue;
-
-                var player = ObjectManager.GetObjectByGuid<WoWPlayer>(guid);
-                if (player == null || !player.IsValid || player.Dead || player.IsGhost || !player.IsFriendly)
-                    continue;
-
-                members.Add(new KeyValuePair<WoWUnit, string>(player, parts[0]));
-            }
-
-            targets.AddRange(members.OrderBy(m => m.Key.HealthPercent));
-            return targets;
-        }
-
-        // Debuff types on the unit that are switched on and not already being cured by an Abolish over time.
-        private static HashSet<WoWDispelType> WantedTypes(WoWUnit unit)
+        // Debuff types on you that are switched on and not already being cured by an Abolish over time.
+        private static HashSet<WoWDispelType> WantedTypes(LocalPlayer me)
         {
             var wanted = new HashSet<WoWDispelType>();
-            foreach (var aura in unit.GetAllAuras())
+            foreach (var aura in me.GetAllAuras())
             {
                 if (!aura.IsHarmful || aura.Spell == null || NeverDispel.Contains(aura.Name))
                     continue;
@@ -213,49 +159,40 @@ namespace AutoCleanse
                     wanted.Add(type);
             }
 
-            foreach (var cure in Cures.Where(c => c.HotAura != null && unit.HasAura(c.HotAura)))
+            foreach (var cure in Cures.Where(c => c.HotAura != null && me.HasAura(c.HotAura)))
                 wanted.ExceptWith(cure.Removes);
 
             return wanted;
         }
 
-        private bool TryCast(LocalPlayer me, WoWUnit unit, Cure cure, int id, List<WoWDispelType> types)
+        private bool TryCast(LocalPlayer me, Cure cure, int id, List<WoWDispelType> types)
         {
+            if (cure.DruidSpell && !DruidFormAllowsCast(me))
+                return false;
             if (me.Shapeshift == ShapeshiftForm.GhostWolf)
                 return false;
 
             var spell = WoWSpell.FromId(id);
-            if (spell == null)
-                return false;
-            if (unit != me && (!unit.InLineOfSpellSight || unit.Distance > spell.MaxRange))
-                return false;
-            if (cure.DruidSpell && !DruidFormAllowsCast(me))
-                return false;
-            if (!SpellManager.CanCast(spell, unit, false))
+            if (spell == null || !SpellManager.CanCast(spell, me, false))
                 return false;
 
-            SpellManager.Cast(spell, unit);
+            SpellManager.Cast(spell, me);
 
             var sw = Stopwatch.StartNew();
             while (sw.ElapsedMilliseconds < 700)
             {
                 if (spell.Cooldown || SpellManager.GlobalCooldown)
                 {
-                    Log("{0} on {1} ({2}).", cure.Name, Who(me, unit), string.Join(", ", types));
+                    Log("{0} on me ({1}).", cure.Name, string.Join(", ", types));
                     return true;
                 }
                 Thread.Sleep(50);
             }
 
             // No GCD started: wrong form, nothing dispellable, out of mana... Don't spam it.
-            _backoff[cure.Name + unit.Guid] = DateTime.UtcNow.AddSeconds(10);
-            Verbose("{0} on {1} did not go off; retrying in 10 s.", cure.Name, Who(me, unit));
+            _backoff[cure.Name] = DateTime.UtcNow.AddSeconds(10);
+            Verbose("{0} did not go off; retrying in 10 s.", cure.Name);
             return false;
-        }
-
-        private static string Who(LocalPlayer me, WoWUnit unit)
-        {
-            return unit == me ? "me" : unit.Name;
         }
 
         // True when the druid can cast in the current form. May cancel the form, then the cast happens next pulse.
@@ -276,31 +213,29 @@ namespace AutoCleanse
             return false;
         }
 
-        private bool TryDevourMagic(LocalPlayer me, WoWUnit unit, string token)
+        private void TryDevourMagic(LocalPlayer me)
         {
             var pet = me.Pet;
-            if (!me.GotAlivePet || pet == null || pet.Location.Distance(unit.Location) > 30 ||
-                InBackoff("Devour Magic" + unit.Guid))
-                return false;
+            if (!me.GotAlivePet || pet == null || pet.Distance > 30 || InBackoff("Devour Magic"))
+                return;
 
             int slot = Lua.GetReturnVal<int>(
                 "for i=1,10 do if GetPetActionInfo(i) == \"Devour Magic\" then " +
                 "if GetPetActionCooldown(i) == 0 then return i end return 0 end end return 0", 0);
             if (slot == 0)
-                return false;
+                return;
 
-            Lua.DoString("CastPetAction({0}, \"{1}\")", slot, token);
+            Lua.DoString("CastPetAction({0}, \"player\")", slot);
             Thread.Sleep(500);
 
             if (Lua.GetReturnVal<double>(string.Format("return GetPetActionCooldown({0})", slot), 0) > 0)
             {
-                Log("Felhunter Devour Magic on {0} (Magic).", Who(me, unit));
-                return true;
+                Log("Felhunter Devour Magic on me (Magic).");
+                return;
             }
 
-            _backoff["Devour Magic" + unit.Guid] = DateTime.UtcNow.AddSeconds(10);
-            Verbose("Devour Magic on {0} did not go off; retrying in 10 s.", Who(me, unit));
-            return false;
+            _backoff["Devour Magic"] = DateTime.UtcNow.AddSeconds(10);
+            Verbose("Devour Magic did not go off; retrying in 10 s.");
         }
 
         private void RefreshKnownSpells(LocalPlayer me)
