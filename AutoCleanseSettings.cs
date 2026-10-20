@@ -59,6 +59,20 @@ namespace AutoCleanse
         public bool CureRaid { get; set; }
 
         [Setting]
+        [DefaultValue(4)]
+        [Category("Throttle")]
+        [DisplayName("Seconds between cures in combat")]
+        [Description("In combat, wait at least this long after a cure before the next one, so your rotation keeps its GCDs. Out of combat there is no wait. 0 turns it off.")]
+        public int CombatGapSeconds { get; set; }
+
+        [Setting]
+        [DefaultValue(3)]
+        [Category("Throttle")]
+        [DisplayName("Skip debuffs ending within (seconds)")]
+        [Description("Don't spend a cure on a debuff that falls off by itself within this many seconds. Debuffs without a duration are always cured. 0 turns it off.")]
+        public int SkipEndingWithinSeconds { get; set; }
+
+        [Setting]
         [DefaultValue(true)]
         [Category("Debuff types")]
         [DisplayName("Remove Magic")]

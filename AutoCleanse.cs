@@ -74,6 +74,7 @@ namespace AutoCleanse
         private DateTime _nextKnownRefresh = DateTime.MinValue;
         private DateTime _nextPulse = DateTime.MinValue;
         private readonly Dictionary<string, DateTime> _backoff = new Dictionary<string, DateTime>();
+        private DateTime _nextCombatCure = DateTime.MinValue;
 
         public override void Initialize()
         {
@@ -114,6 +115,9 @@ namespace AutoCleanse
                 me.Stunned || me.Silenced || me.IsCasting || me.IsChanneling || me.IsStealthed)
                 return;
 
+            if (me.Combat && DateTime.UtcNow < _nextCombatCure)
+                return;
+
             RefreshKnownSpells(me);
 
             var classCovered = new HashSet<WoWDispelType>(
@@ -122,9 +126,10 @@ namespace AutoCleanse
             foreach (var target in Targets(me))
             {
                 var unit = target.Key;
-                var wanted = WantedTypes(unit);
-                if (wanted.Count == 0)
+                var auras = WantedAuras(unit);
+                if (auras.Count == 0)
                     continue;
+                var wanted = new HashSet<WoWDispelType>(auras.Select(a => a.Spell.DispelType));
 
                 foreach (var cure in Cures)
                 {
@@ -138,7 +143,9 @@ namespace AutoCleanse
                     if (id == 0 || InBackoff(cure.Name + unit.Guid))
                         continue;
 
-                    if (TryCast(me, unit, cure, id, types))
+                    var what = string.Join(", ", auras.Where(a => types.Contains(a.Spell.DispelType))
+                        .Select(a => a.Name + " (" + a.Spell.DispelType + ")").Distinct());
+                    if (TryCast(me, unit, cure, id, what))
                         return;
                 }
 
@@ -197,29 +204,38 @@ namespace AutoCleanse
             return targets;
         }
 
-        // Debuff types on the unit that are switched on and not already being cured by an Abolish over time.
-        private static HashSet<WoWDispelType> WantedTypes(WoWUnit unit)
+        // Debuffs on the unit whose type is switched on, that won't fall off by themselves within
+        // "Skip debuffs ending within", and that an Abolish over time isn't already curing.
+        private static List<WoWAura> WantedAuras(WoWUnit unit)
         {
-            var wanted = new HashSet<WoWDispelType>();
-            foreach (var aura in unit.GetAllAuras())
+            var all = unit.GetAllAuras();
+            var hotCovered = new HashSet<WoWDispelType>(
+                Cures.Where(c => c.HotAura != null && all.Any(a => a.Name == c.HotAura)).SelectMany(c => c.Removes));
+
+            var wanted = new List<WoWAura>();
+            foreach (var aura in all)
             {
                 if (!aura.IsHarmful || aura.Spell == null || NeverDispel.Contains(aura.Name))
                     continue;
                 var type = aura.Spell.DispelType;
-                if ((type == WoWDispelType.Magic && S.RemoveMagic) ||
-                    (type == WoWDispelType.Curse && S.RemoveCurse) ||
-                    (type == WoWDispelType.Poison && S.RemovePoison) ||
-                    (type == WoWDispelType.Disease && S.RemoveDisease))
-                    wanted.Add(type);
+                if (hotCovered.Contains(type))
+                    continue;
+                if (!((type == WoWDispelType.Magic && S.RemoveMagic) ||
+                      (type == WoWDispelType.Curse && S.RemoveCurse) ||
+                      (type == WoWDispelType.Poison && S.RemovePoison) ||
+                      (type == WoWDispelType.Disease && S.RemoveDisease)))
+                    continue;
+
+                var left = aura.TimeLeft.TotalSeconds;
+                if (left > 0 && left < S.SkipEndingWithinSeconds)
+                    continue;
+
+                wanted.Add(aura);
             }
-
-            foreach (var cure in Cures.Where(c => c.HotAura != null && unit.HasAura(c.HotAura)))
-                wanted.ExceptWith(cure.Removes);
-
             return wanted;
         }
 
-        private bool TryCast(LocalPlayer me, WoWUnit unit, Cure cure, int id, List<WoWDispelType> types)
+        private bool TryCast(LocalPlayer me, WoWUnit unit, Cure cure, int id, string what)
         {
             if (me.Shapeshift == ShapeshiftForm.GhostWolf)
                 return false;
@@ -231,7 +247,8 @@ namespace AutoCleanse
                 return false;
             if (cure.DruidSpell && !DruidFormAllowsCast(me))
                 return false;
-            if (!SpellManager.CanCast(spell, unit, false))
+            // No lag tolerance: the GCD must be fully over, or the GCD check below can't tell our cast went off.
+            if (SpellManager.GlobalCooldown || !SpellManager.CanCast(spell, unit, false, false, false))
                 return false;
 
             SpellManager.Cast(spell, unit);
@@ -241,7 +258,8 @@ namespace AutoCleanse
             {
                 if (spell.Cooldown || SpellManager.GlobalCooldown)
                 {
-                    Log("{0} on {1} ({2}).", cure.Name, Who(me, unit), string.Join(", ", types));
+                    Log("{0} on {1}: {2}.", cure.Name, Who(me, unit), what);
+                    _nextCombatCure = DateTime.UtcNow.AddSeconds(S.CombatGapSeconds);
                     return true;
                 }
                 Thread.Sleep(50);
@@ -295,6 +313,7 @@ namespace AutoCleanse
             if (Lua.GetReturnVal<double>(string.Format("return GetPetActionCooldown({0})", slot), 0) > 0)
             {
                 Log("Felhunter Devour Magic on {0} (Magic).", Who(me, unit));
+                _nextCombatCure = DateTime.UtcNow.AddSeconds(S.CombatGapSeconds);
                 return true;
             }
 
