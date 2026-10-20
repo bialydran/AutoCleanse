@@ -19,4 +19,5 @@ Copy `AutoCleanse.cs` and `AutoCleanseSettings.cs` into the `Plugins` folder of 
 
 ## Status
 
-Compiles against CopilotBuddy 1.7.6.5. Not yet tested in game.
+Compiles against CopilotBuddy 1.7.6.5. 
+Tested as Paladin only so far. Issues / PRs appreciated. 
