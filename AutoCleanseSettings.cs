@@ -45,6 +45,20 @@ namespace AutoCleanse
         }
 
         [Setting]
+        [DefaultValue(false)]
+        [Category("Targets")]
+        [DisplayName("Cure party")]
+        [Description("Also cure your party members. In a raid this is your own subgroup. You are always cured first.")]
+        public bool CureParty { get; set; }
+
+        [Setting]
+        [DefaultValue(false)]
+        [Category("Targets")]
+        [DisplayName("Cure raid")]
+        [Description("In a raid, cure every raid member, not only your subgroup. You are always cured first.")]
+        public bool CureRaid { get; set; }
+
+        [Setting]
         [DefaultValue(true)]
         [Category("Debuff types")]
         [DisplayName("Remove Magic")]
@@ -83,7 +97,7 @@ namespace AutoCleanse
         [DefaultValue(true)]
         [Category("Extras")]
         [DisplayName("Warlock Felhunter")]
-        [Description("Have the Felhunter cast Devour Magic on you to remove a Magic debuff. The pet must be within 30 yards.")]
+        [Description("Have the Felhunter cast Devour Magic to remove a Magic debuff from you, or from party/raid members when those are on. The pet must be within 30 yards of the target.")]
         public bool UseFelhunter { get; set; }
 
         [Setting]
